@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import multiprocessing as mp
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
@@ -19,6 +20,12 @@ from pathlib import Path
 import torch
 
 from .core import train
+
+
+def resolve_device(name: str) -> str:
+    if name == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return name
 
 
 def run_one(cfg: dict) -> dict:
@@ -44,6 +51,7 @@ def _cfg(a, frac, wd, seed) -> dict:
         seed=seed,
         d=a.d,
         stop_after_generalise=a.stop_after,
+        device=resolve_device(a.device),
     )
 
 
@@ -142,6 +150,9 @@ def main(argv=None) -> None:
     ap.add_argument("--wds", type=float, nargs="+", default=[0.0, 0.3, 1.0])
     ap.add_argument("--seeds", type=int, nargs="+", default=[0])
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument(
+        "--device", default="cpu", help="cpu | cuda | auto (several runs can share one GPU)"
+    )
     ap.add_argument("--out", type=Path, default=Path("results"))
     a = ap.parse_args(argv)
     a.out.mkdir(parents=True, exist_ok=True)
@@ -155,10 +166,19 @@ def main(argv=None) -> None:
         return
 
     cfgs = [_cfg(a, f, w, s) for f, w, s in itertools.product(a.fracs, a.wds, a.seeds)]
-    rows = []
-    with ProcessPoolExecutor(a.workers) as ex:
-        for r in ex.map(run_one, cfgs):
+    # Resumable: finished runs are appended to runs.jsonl as they complete, so a dropped
+    # Colab session loses at most the runs in flight.
+    log = a.out / "runs.jsonl"
+    rows = [json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
+    done = {json.dumps(r["config"], sort_keys=True) for r in rows}
+    todo = [c for c in cfgs if json.dumps(c, sort_keys=True) not in done]
+    print(f"{len(todo)} runs to do ({len(rows)} already done)", flush=True)
+    ctx = mp.get_context("spawn")  # required for CUDA in worker processes
+    with ProcessPoolExecutor(a.workers, mp_context=ctx) as ex:
+        for r in ex.map(run_one, todo):
             rows.append(r)
+            with log.open("a") as fh:
+                fh.write(json.dumps(r) + "\n")
             c, s = r["config"], r["summary"]
             print(
                 f"frac={c['frac_train']} wd={c['wd']} seed={c['seed']}: "

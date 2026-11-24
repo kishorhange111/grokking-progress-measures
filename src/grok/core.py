@@ -73,12 +73,13 @@ def fourier_basis(p: int) -> torch.Tensor:
 
 def frequency_norms(W_E: torch.Tensor, p: int) -> np.ndarray:
     """Norm of the embedding in each frequency k = 1..p//2 (cos and sin combined)."""
-    F_ = fourier_basis(p) @ W_E[:p]
+    F_ = fourier_basis(p) @ W_E[:p].detach().float().cpu()
     sq = F_.pow(2).sum(1)
     return np.array([float(sq[2 * k - 1] + sq[2 * k]) for k in range(1, p // 2 + 1)]) ** 0.5
 
 
 def fourier_sparsity(W_E: torch.Tensor, p: int, top_k: int = 5) -> float:
+    W_E = W_E.detach().float().cpu()
     n2 = frequency_norms(W_E, p) ** 2
     return float(np.sort(n2)[::-1][:top_k].sum() / n2.sum())
 
@@ -126,10 +127,12 @@ def train(
     seed: int = 0,
     d: int = 128,
     stop_after_generalise: int | None = None,
+    device: str = "cpu",
 ) -> tuple[OneLayer, Run]:
     torch.manual_seed(seed)
     (xtr, ytr), (xte, yte) = make_data(p, frac_train, seed)
-    model = OneLayer(p, d=d)
+    xtr, ytr, xte, yte = (t.to(device) for t in (xtr, ytr, xte, yte))
+    model = OneLayer(p, d=d).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.98))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / 10))
     run = Run()
