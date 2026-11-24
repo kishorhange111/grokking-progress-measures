@@ -6,3 +6,4 @@ runs/
 *.pt
 .venv/
 results/logs/
+*.log
